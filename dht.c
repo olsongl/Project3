@@ -179,7 +179,7 @@ long dht_get(const char *key)
         int header[2] = {msg_type, key_len};
         MPI_Send(header, 2, MPI_INT, owner, TAG_RPC, MPI_COMM_WORLD);
         MPI_Send((void*)key, key_len, MPI_CHAR, owner, TAG_RPC, MPI_COMM_WORLD);
-        long result;
+        int result;
         MPI_Recv(&result, 1, MPI_LONG, owner, TAG_RPC, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         return result;
     }
