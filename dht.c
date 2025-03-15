@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#include <string.h>
 
 #include "dht.h"
 
@@ -32,6 +33,9 @@ static int nprocs;
 static pthread_t server_thread;
 static pthread_mutex_t local_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* New flag for synchronizing dht_size on rank 0 */
+static volatile int size_in_progress = 0;
+
 static int hash(const char *name) {
     unsigned h = 5381;
     while (*name != '\0') {
@@ -46,6 +50,11 @@ static void* server_thread_func(void *arg) {
         int flag = 0;
         MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, &status);
         if (flag) {
+            // If running on rank 0 and a size operation is in progress,
+            // skip TAG_SIZE messages so that the main thread can handle them.
+            if (status.MPI_TAG == TAG_SIZE && rank == 0 && size_in_progress) {
+                continue;
+            }
             if (status.MPI_TAG == TAG_SIZE) {
                 int req;
                 MPI_Recv(&req, 1, MPI_INT, status.MPI_SOURCE, TAG_SIZE,
@@ -54,7 +63,7 @@ static void* server_thread_func(void *arg) {
                     pthread_mutex_lock(&local_lock);
                     unsigned int local_count = local_size();
                     pthread_mutex_unlock(&local_lock);
-                    MPI_Send(&local_count, 1, MPI_UNSIGNED_LONG, status.MPI_SOURCE,
+                    MPI_Send(&local_count, 1, MPI_UNSIGNED, status.MPI_SOURCE,
                              TAG_SIZE, MPI_COMM_WORLD);
                 }
                 continue;
@@ -179,7 +188,7 @@ long dht_get(const char *key)
         int header[2] = {msg_type, key_len};
         MPI_Send(header, 2, MPI_INT, owner, TAG_RPC, MPI_COMM_WORLD);
         MPI_Send((void*)key, key_len, MPI_CHAR, owner, TAG_RPC, MPI_COMM_WORLD);
-        int result;
+        long result;
         MPI_Recv(&result, 1, MPI_LONG, owner, TAG_RPC, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         return result;
     }
@@ -193,6 +202,8 @@ size_t dht_size()
     pthread_mutex_unlock(&local_lock);
     
     if (rank == 0) {
+        /* Indicate that a size operation is in progress so the server thread skips TAG_SIZE */
+        size_in_progress = 1;
         unsigned int global_count = local_count;
         int size_req = MSG_SIZE_REQ;
         // Rank 0 sends a size request to every other process.
@@ -202,10 +213,12 @@ size_t dht_size()
         // And then collects the responses.
         for (int p = 1; p < nprocs; p++) {
             unsigned int remote_count;
-            MPI_Recv(&remote_count, 1, MPI_UNSIGNED_LONG, p, TAG_SIZE,
+            MPI_Recv(&remote_count, 1, MPI_UNSIGNED, p, TAG_SIZE,
                      MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             global_count += remote_count;
         }
+        /* Clear the flag so the server thread resumes normal processing */
+        size_in_progress = 0;
         return global_count;
     } else {
         // Non-root processes simply return their local count.
